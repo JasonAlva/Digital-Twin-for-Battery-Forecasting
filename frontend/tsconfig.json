@@ -10,16 +10,18 @@
     "strict": false,
     "noEmit": true,
     "incremental": true,
+    "tsBuildInfoFile": ".next/tsbuildinfo",
     "module": "esnext",
     "esModuleInterop": true,
-    "moduleResolution": "node",
+    "moduleResolution": "bundler",
     "resolveJsonModule": true,
     "isolatedModules": true,
     "jsx": "preserve",
     "baseUrl": ".",
     "paths": {
       "@/*": ["./*"]
-    }
+    },
+    "types": ["node"]
   },
   "include": [
     "next-env.d.ts",
@@ -27,6 +29,7 @@
     "**/*.tsx"
   ],
   "exclude": [
-    "node_modules"
+    "node_modules",
+    ".next"
   ]
 }

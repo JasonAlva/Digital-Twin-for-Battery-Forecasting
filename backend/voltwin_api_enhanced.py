@@ -1,32 +1,54 @@
 """
-VoltTwin FastAPI Backend - Enhanced Edition
-Hybrid Battery Digital Twin Simulator
+VoltTwin FastAPI Backend - Enterprise Edition
+Hybrid Battery Digital Twin Simulator for 5 Industries
 
-Combines physics-based modeling with trained ML model for accurate capacity prediction.
+Supports:
+1. EV Manufacturers - Warranty forecasting & fleet monitoring
+2. Grid Energy Storage - Multi-battery health dashboard
+3. Electric Bus Fleets - Route-aware battery assignment
+4. Residential Batteries - Customer health tracking
+5. Manufacturing QA - Defect detection & degradation analysis
+
 Run with: uvicorn voltwin_api_enhanced:app --reload --host 0.0.0.0 --port 8000
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import pickle
 import numpy as np
 import logging
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Any
 from enum import Enum
 from pathlib import Path
 import time
+from datetime import datetime, timedelta
+import json
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ==================== Data Models ====================
+# ==================== Enums & Constants ====================
 class UsageProfile(str, Enum):
     light = "light"
     standard = "standard"
     heavy = "heavy"
 
+class Industry(str, Enum):
+    ev_manufacturer = "ev_manufacturer"
+    grid_storage = "grid_storage"
+    fleet_management = "fleet_management"
+    residential = "residential"
+    manufacturing_qa = "manufacturing_qa"
+
+class HealthStatus(str, Enum):
+    healthy = "healthy"
+    aging = "aging"
+    risk = "risk"
+    critical = "critical"
+
+# ==================== Core Data Models ====================
 class SimulationInput(BaseModel):
     """Input validation schema for battery simulations"""
     initial_capacity_ah: float = Field(..., gt=0, le=500, description="Initial battery capacity in Ah")
@@ -45,6 +67,110 @@ class SimulationResult(BaseModel):
     eol_cycle: Optional[int]
     metrics: dict
     v: int
+
+# ==================== Industry-Specific Models ====================
+
+# 1️⃣ EV MANUFACTURER MODELS
+class BatteryTest(BaseModel):
+    """Single battery test result"""
+    test_id: str
+    battery_id: str
+    initial_capacity_ah: float
+    temperature_celsius: float
+    discharge_current_a: float
+    num_cycles: int
+    time_per_cycle_minutes: int
+    eol_cycle: int
+    timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
+
+class WarrantyCostForecast(BaseModel):
+    """Warranty cost prediction for fleet"""
+    total_batteries: int
+    predicted_failures_next_year: int
+    cost_per_battery: float
+    predicted_warranty_cost: float
+    confidence: float  # 0-1
+    breakdown: Dict[str, int]  # By month
+
+# 2️⃣ GRID ENERGY STORAGE MODELS
+class GridBatteryStatus(BaseModel):
+    """Status of a single grid battery"""
+    battery_id: str
+    soh_percent: float  # State of Health 0-100
+    health_category: HealthStatus
+    available_capacity_kwh: float
+    cycles_completed: int
+    temperature_c: float
+    last_updated: str = Field(default_factory=lambda: datetime.now().isoformat())
+
+class GridHealthSummary(BaseModel):
+    """Overall grid battery health snapshot"""
+    total_batteries: int
+    healthy_count: int
+    aging_count: int
+    risk_count: int
+    critical_count: int
+    total_available_capacity_kwh: float
+    capacity_utilization_percent: float
+    next_maintenance_required: List[str]  # Battery IDs
+
+# 3️⃣ FLEET MANAGEMENT MODELS
+class FleetBattery(BaseModel):
+    """Single vehicle battery status"""
+    vehicle_id: str
+    battery_id: str
+    soh_percent: float
+    remaining_range_km: float
+    suitable_for_routes: List[str]
+    recommendation: str
+    risk_level: str  # green, yellow, red
+
+class RouteAssignment(BaseModel):
+    """Intelligent route assignment"""
+    route_id: str
+    route_distance_km: int
+    vehicle_id: str
+    battery_soh: float
+    confidence: float  # 0-1 success probability
+    recommendation: str
+
+# 4️⃣ RESIDENTIAL CUSTOMER MODELS
+class CustomerBatteryStatus(BaseModel):
+    """What residential customer sees in their app"""
+    battery_id: str
+    soh_percent: float
+    installed_date: str
+    age_years: float
+    warranty_status: str  # "Active", "Expiring Soon", "Expired"
+    remaining_life_years: int
+    daily_savings_usd: float
+    monthly_savings_usd: float
+    annual_savings_usd: float
+    health_message: str
+    upgrade_recommendation: Optional[str]
+
+# 5️⃣ MANUFACTURING QA MODELS
+class CellTest(BaseModel):
+    """Individual cell test result"""
+    cell_id: str
+    batch_id: str
+    rated_capacity_ah: float
+    retention_percent: float  # After 50 cycles
+    pass_fail: str  # "PASS" or "REJECT"
+    degradation_pattern: str  # "normal", "accelerated", "anomaly"
+    reason: Optional[str]  # Why rejected
+    timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
+
+class BatchQAReport(BaseModel):
+    """QA summary for a production batch"""
+    batch_id: str
+    total_cells_tested: int
+    cells_passed: int
+    cells_rejected: int
+    pass_rate_percent: float
+    anomalies_detected: List[str]
+    recommended_action: str
+    cost_impact: float  # Savings from early defect detection
 
 # ==================== Initialize FastAPI ====================
 app = FastAPI(
@@ -82,7 +208,312 @@ def load_model():
         logger.error(f"✗ Error loading model: {e}")
         return False
 
-# ==================== Physics Model ====================
+# ==================== SoH Calculation Engine ====================
+def calculate_soh(
+    cycles_completed: int,
+    initial_capacity_ah: float,
+    current_capacity_ah: float,
+    temperature_c: float,
+    usage_profile: str
+) -> float:
+    """
+    Calculate State of Health (SoH) percentage
+    
+    SoH = (Current Capacity / Initial Capacity) * 100%
+    
+    Args:
+        cycles_completed: Number of charge/discharge cycles
+        initial_capacity_ah: Rated capacity
+        current_capacity_ah: Measured capacity
+        temperature_c: Operating temperature
+        usage_profile: light/standard/heavy
+    
+    Returns:
+        SoH percentage (0-100%)
+    """
+    if initial_capacity_ah <= 0:
+        return 0.0
+    
+    soh = (current_capacity_ah / initial_capacity_ah) * 100.0
+    return max(0.0, min(100.0, soh))
+
+def classify_health_status(soh_percent: float) -> HealthStatus:
+    """Classify battery health based on SoH"""
+    if soh_percent >= 90:
+        return HealthStatus.healthy
+    elif soh_percent >= 80:
+        return HealthStatus.aging
+    elif soh_percent >= 70:
+        return HealthStatus.risk
+    else:
+        return HealthStatus.critical
+
+def predict_eol_date(
+    soh_percent: float,
+    cycles_completed: int,
+    cycles_per_month: float = 100
+) -> Optional[int]:
+    """
+    Predict months until End of Life (80% SoH threshold)
+    
+    Returns:
+        Months until EOL, or None if already below threshold
+    """
+    if soh_percent < 70:
+        return None
+    
+    eol_soh = 80
+    if soh_percent <= eol_soh:
+        return 0
+    
+    # Estimate degradation rate from current state
+    degradation_per_month = 0.5  # Conservative estimate
+    months_to_eol = (soh_percent - eol_soh) / degradation_per_month
+    
+    return max(1, int(months_to_eol))
+
+# ==================== Industry-Specific Business Logic ====================
+
+# 1️⃣ EV MANUFACTURER LOGIC
+def analyze_battery_test_batch(tests: List[Dict[str, Any]]) -> WarrantyCostForecast:
+    """
+    Analyze a batch of battery tests for warranty forecasting
+    
+    Companies need this to:
+    - Determine which batteries are defective early
+    - Forecast warranty costs
+    - Plan recall strategies
+    """
+    eol_cycles = [t.get('eol_cycle', 1000) for t in tests]
+    avg_eol = np.mean(eol_cycles)
+    std_eol = np.std(eol_cycles)
+    
+    # Identify outliers (potential defects)
+    outlier_threshold = avg_eol - 2 * std_eol
+    defective_count = sum(1 for eol in eol_cycles if eol < outlier_threshold)
+    
+    # Warranty cost calculation
+    total_tests = len(tests)
+    cost_per_battery = 8000  # USD
+    annual_production = 500000  # vehicles
+    predicted_failures = int((defective_count / total_tests) * annual_production)
+    warranty_cost = predicted_failures * cost_per_battery
+    
+    # Monthly breakdown
+    breakdown = {
+        f"Q{q}_batch_{i}": predicted_failures // 4
+        for q in range(1, 5)
+        for i in range(1, 3)
+    }
+    
+    return WarrantyCostForecast(
+        total_batteries=total_tests,
+        predicted_failures_next_year=predicted_failures,
+        cost_per_battery=cost_per_battery,
+        predicted_warranty_cost=warranty_cost,
+        confidence=0.85,
+        breakdown=breakdown
+    )
+
+# 2️⃣ GRID ENERGY STORAGE LOGIC
+def generate_grid_health_snapshot(batteries: List[GridBatteryStatus]) -> GridHealthSummary:
+    """
+    Generate real-time health snapshot for grid operations
+    
+    Grid operators need to know:
+    - How much capacity is available RIGHT NOW
+    - Which batteries need immediate attention
+    - Can they handle peak demand?
+    """
+    healthy = sum(1 for b in batteries if b.health_category == HealthStatus.healthy)
+    aging = sum(1 for b in batteries if b.health_category == HealthStatus.aging)
+    risk = sum(1 for b in batteries if b.health_category == HealthStatus.risk)
+    critical = sum(1 for b in batteries if b.health_category == HealthStatus.critical)
+    
+    total_capacity = sum(b.available_capacity_kwh for b in batteries)
+    max_capacity = sum(b.available_capacity_kwh / (b.soh_percent / 100.0) for b in batteries)
+    utilization = (total_capacity / max_capacity * 100) if max_capacity > 0 else 0
+    
+    # Flag batteries needing maintenance
+    maintenance_needed = [
+        b.battery_id for b in batteries
+        if b.health_category in [HealthStatus.risk, HealthStatus.critical]
+    ]
+    
+    return GridHealthSummary(
+        total_batteries=len(batteries),
+        healthy_count=healthy,
+        aging_count=aging,
+        risk_count=risk,
+        critical_count=critical,
+        total_available_capacity_kwh=total_capacity,
+        capacity_utilization_percent=utilization,
+        next_maintenance_required=maintenance_needed[:10]  # Top 10
+    )
+
+# 3️⃣ FLEET MANAGEMENT LOGIC
+def assign_battery_to_route(
+    battery_soh: float,
+    route_distance_km: int,
+    energy_consumption_per_km: float = 0.2
+) -> RouteAssignment:
+    """
+    Intelligently assign batteries to routes based on health
+    
+    Fleet managers need to know:
+    - Can this battery finish this route?
+    - Should we assign it to this route?
+    - What's the confidence level?
+    """
+    energy_needed = route_distance_km * energy_consumption_per_km
+    available_energy = 100 * battery_soh / 100 * energy_consumption_per_km * 500  # Assumes 100 kWh battery
+    
+    safety_margin = 0.3  # 30% reserve
+    confidence = min(100, (available_energy / energy_needed - safety_margin) * 100) / 100
+    confidence = max(0, min(1, confidence))
+    
+    if battery_soh >= 90:
+        recommendation = "OPTIMAL - Suitable for long routes"
+    elif battery_soh >= 80:
+        recommendation = "GOOD - Suitable for medium routes"
+    elif battery_soh >= 70:
+        recommendation = "CAUTION - Assign to short routes only"
+    else:
+        recommendation = "DO NOT ASSIGN - Schedule maintenance"
+    
+    route_id = f"ROUTE_{int(route_distance_km)}_{int(battery_soh)}"
+    
+    return RouteAssignment(
+        route_id=route_id,
+        route_distance_km=route_distance_km,
+        vehicle_id="",
+        battery_soh=battery_soh,
+        confidence=confidence,
+        recommendation=recommendation
+    )
+
+# 4️⃣ RESIDENTIAL CUSTOMER LOGIC
+def generate_customer_dashboard(
+    battery_id: str,
+    soh_percent: float,
+    installed_years_ago: float,
+    daily_discharge_kwh: float = 5
+) -> CustomerBatteryStatus:
+    """
+    Generate what residential customers see in their app
+    
+    Customer needs to feel:
+    - My battery is working well
+    - I'm saving money
+    - Transparency about future needs
+    """
+    # Calculate savings
+    electricity_cost_per_kwh = 0.15  # USD (varies by region)
+    daily_savings = daily_discharge_kwh * electricity_cost_per_kwh
+    monthly_savings = daily_savings * 30
+    annual_savings = daily_savings * 365
+    
+    # Warranty status
+    if soh_percent >= 90:
+        warranty_status = "Active - Excellent condition"
+        health_message = "Your battery is healthy! 🟢"
+        upgrade_recommendation = None
+    elif soh_percent >= 80:
+        warranty_status = "Active - Normal aging"
+        health_message = "Your battery is aging normally. Still under warranty. 🟡"
+        upgrade_recommendation = "Consider upgrading in 2-3 years for newer technology"
+    elif soh_percent >= 70:
+        warranty_status = "Active - Approaching EOL"
+        health_message = "Your battery is nearing end-of-life. Warranty covers replacement. 🟠"
+        upgrade_recommendation = "You qualify for warranty service. Schedule inspection."
+    else:
+        warranty_status = "Warranty Service Available"
+        health_message = "Your battery needs replacement. Contact us for warranty service. 🔴"
+        upgrade_recommendation = "Free replacement available under warranty"
+    
+    remaining_years = max(0, 10 - installed_years_ago)
+    
+    return CustomerBatteryStatus(
+        battery_id=battery_id,
+        soh_percent=soh_percent,
+        installed_date=(datetime.now() - timedelta(days=365*installed_years_ago)).isoformat(),
+        age_years=installed_years_ago,
+        warranty_status=warranty_status,
+        remaining_life_years=remaining_years,
+        daily_savings_usd=daily_savings,
+        monthly_savings_usd=monthly_savings,
+        annual_savings_usd=annual_savings,
+        health_message=health_message,
+        upgrade_recommendation=upgrade_recommendation
+    )
+
+# 5️⃣ MANUFACTURING QA LOGIC
+def analyze_cell_quality(retention_percent: float, batch_id: str, cell_id: str) -> CellTest:
+    """
+    Analyze individual cell quality
+    
+    QA engineers need to:
+    - Catch defects EARLY (save $4,750 per bad cell)
+    - Identify root causes
+    - Stop bad batches
+    """
+    # Normal cells retain 99%+ capacity after 50 cycles
+    if retention_percent >= 99:
+        degradation_pattern = "normal"
+        pass_fail = "PASS"
+        reason = None
+    elif retention_percent >= 98:
+        degradation_pattern = "normal"
+        pass_fail = "PASS"
+        reason = None
+    elif retention_percent >= 97:
+        degradation_pattern = "slightly_accelerated"
+        pass_fail = "PASS"
+        reason = None
+    else:
+        degradation_pattern = "accelerated"
+        pass_fail = "REJECT"
+        reason = "Accelerated degradation detected - likely internal resistance issue"
+    
+    return CellTest(
+        cell_id=cell_id,
+        batch_id=batch_id,
+        rated_capacity_ah=3.5,  # Standard test capacity
+        retention_percent=retention_percent,
+        pass_fail=pass_fail,
+        degradation_pattern=degradation_pattern,
+        reason=reason
+    )
+
+def generate_batch_qa_report(cells: List[CellTest]) -> BatchQAReport:
+    """Generate QA summary for production batch"""
+    total = len(cells)
+    passed = sum(1 for c in cells if c.pass_fail == "PASS")
+    rejected = sum(1 for c in cells if c.pass_fail == "REJECT")
+    pass_rate = (passed / total * 100) if total > 0 else 0
+    
+    anomalies = [c.cell_id for c in cells if c.degradation_pattern == "accelerated"]
+    
+    # Cost impact: Catching defects early saves $4,750 per cell
+    savings = rejected * 4750
+    
+    if rejected == 0:
+        action = "✅ PASS - All cells meet quality standards. Proceed to packaging."
+    elif rejected <= 2:
+        action = "⚠️ REVIEW - Minor defects detected. Investigate batch conditions."
+    else:
+        action = "❌ STOP - Significant defects. Halt production. Root cause analysis required."
+    
+    return BatchQAReport(
+        batch_id=cells[0].batch_id if cells else "UNKNOWN",
+        total_cells_tested=total,
+        cells_passed=passed,
+        cells_rejected=rejected,
+        pass_rate_percent=pass_rate,
+        anomalies_detected=anomalies,
+        recommended_action=action,
+        cost_impact=savings
+    )
 def physics_model_degradation(
     initial_capacity: float,
     cycles: np.ndarray,
@@ -378,6 +809,333 @@ async def get_profiles():
                 "description": "Heavy usage - 40% faster degradation",
                 "examples": ["Continuous operation", "Fast charging", "Hot environment"]
             }
+        }
+    }
+
+# ==================== INDUSTRY-SPECIFIC ENDPOINTS ====================
+
+# 1️⃣ EV MANUFACTURER ENDPOINTS
+@app.post("/ev-manufacturer/analyze-batch")
+async def ev_analyze_batch(tests: List[Dict[str, Any]]):
+    """
+    EV Manufacturer: Analyze battery test batch for warranty forecasting
+    
+    Input: List of battery test results
+    Output: Warranty cost forecast, defect detection, quality metrics
+    """
+    forecast = analyze_battery_test_batch(tests)
+    return {
+        "status": "success",
+        "data": forecast.dict(),
+        "interpretation": {
+            "quality_status": "GOOD" if forecast.predicted_failures_next_year < 100 else "CONCERN",
+            "warranty_reserve": f"${forecast.predicted_warranty_cost:,.0f}/year",
+            "action": "Proceed with production" if forecast.pass_rate_percent > 95 else "Review manufacturing process"
+        }
+    }
+
+@app.get("/ev-manufacturer/fleet-health/{batch_id}")
+async def ev_fleet_health(
+    batch_id: str,
+    total_deployed: int = Query(500000, description="Total vehicles deployed")
+):
+    """
+    EV Manufacturer: Real-time fleet health monitoring
+    
+    Tracks health of all vehicles in the field
+    """
+    # Simulated fleet data - in production, query real telemetry
+    healthy_percent = np.random.normal(85, 5)
+    aging_percent = np.random.normal(12, 3)
+    risk_percent = 100 - healthy_percent - aging_percent
+    
+    return {
+        "batch_id": batch_id,
+        "total_deployed": total_deployed,
+        "health_distribution": {
+            "healthy": int(total_deployed * healthy_percent / 100),
+            "aging": int(total_deployed * aging_percent / 100),
+            "at_risk": int(total_deployed * risk_percent / 100)
+        },
+        "warranty_alerts": int(total_deployed * risk_percent / 100 * 0.1),
+        "recommended_recall_threshold": 5,  # percent
+        "current_risk": "LOW" if risk_percent < 5 else "MEDIUM" if risk_percent < 10 else "HIGH"
+    }
+
+# 2️⃣ GRID ENERGY STORAGE ENDPOINTS
+@app.post("/grid-storage/battery-status")
+async def grid_battery_status(battery: GridBatteryStatus):
+    """
+    Grid Storage: Report single battery health status
+    
+    Called by monitoring system every 5 minutes per battery
+    """
+    health = classify_health_status(battery.soh_percent)
+    eol_months = predict_eol_date(battery.soh_percent, battery.cycles_completed)
+    
+    return {
+        "battery_id": battery.battery_id,
+        "soh": battery.soh_percent,
+        "status": health.value,
+        "eol_prediction_months": eol_months,
+        "action_required": health in [HealthStatus.risk, HealthStatus.critical],
+        "priority": "IMMEDIATE" if health == HealthStatus.critical else "SCHEDULE" if health == HealthStatus.risk else "MONITOR"
+    }
+
+@app.post("/grid-storage/health-snapshot")
+async def grid_health_snapshot(batteries: List[GridBatteryStatus]):
+    """
+    Grid Storage: Get real-time snapshot of entire grid battery array
+    
+    Used for:
+    - Trading decisions (how much capacity available?)
+    - Maintenance scheduling (which batteries need service?)
+    - Risk assessment (can we handle peak load?)
+    """
+    summary = generate_grid_health_snapshot(batteries)
+    
+    # Decision support
+    can_handle_peak = summary.total_available_capacity_kwh > 900  # 90% of 1000 kWh
+    maintenance_urgent = summary.critical_count > 0
+    
+    return {
+        "snapshot": summary.dict(),
+        "capacity_available_kwh": summary.total_available_capacity_kwh,
+        "capacity_percent": summary.capacity_utilization_percent,
+        "can_handle_peak_load": can_handle_peak,
+        "maintenance_urgent": maintenance_urgent,
+        "maintenance_batteries": summary.next_maintenance_required,
+        "trading_recommendation": {
+            "sell_capacity_kwh": int(summary.total_available_capacity_kwh * 0.9),
+            "backup_needed_kwh": int((1000 - summary.total_available_capacity_kwh) * 0.1),
+            "estimated_profit": int(summary.total_available_capacity_kwh * 150)  # $/hour
+        }
+    }
+
+# 3️⃣ FLEET MANAGEMENT ENDPOINTS
+@app.get("/fleet/route-assignment")
+async def fleet_route_assignment(
+    vehicle_id: str,
+    route_distance_km: int,
+    battery_soh: float
+):
+    """
+    Fleet Manager: Get route assignment recommendation
+    
+    Input: Vehicle, route distance, current battery SoH
+    Output: Safe assignment decision with confidence
+    """
+    assignment = assign_battery_to_route(battery_soh, route_distance_km)
+    assignment.vehicle_id = vehicle_id
+    
+    safe_to_assign = assignment.confidence > 0.5
+    
+    return {
+        "vehicle_id": vehicle_id,
+        "assignment": assignment.dict(),
+        "safe_to_assign": safe_to_assign,
+        "confidence_percent": assignment.confidence * 100,
+        "driver_message": (
+            "✅ Battery good - route is safe" if safe_to_assign
+            else "⚠️ Battery low - short route only"
+            if battery_soh >= 70
+            else "❌ Battery critical - maintenance required"
+        )
+    }
+
+@app.post("/fleet/batch-assignments")
+async def fleet_batch_assignments(vehicles: List[Dict[str, Any]]):
+    """
+    Fleet Manager: Assign all vehicles to optimal routes for today
+    
+    Input: List of vehicles with battery SOH
+    Output: Optimized route assignments, maintenance flag
+    """
+    assignments = []
+    maintenance_required = []
+    
+    for v in vehicles:
+        assignment = assign_battery_to_route(v.get('battery_soh', 85), v.get('max_route_km', 200))
+        assignment.vehicle_id = v.get('vehicle_id', 'UNKNOWN')
+        assignments.append(assignment.dict())
+        
+        if v.get('battery_soh', 100) < 70:
+            maintenance_required.append(v.get('vehicle_id'))
+    
+    return {
+        "assignments": assignments,
+        "maintenance_required": maintenance_required,
+        "fleet_status": "OPERATIONAL" if not maintenance_required else "PARTIAL",
+        "available_vehicles": len(vehicles) - len(maintenance_required),
+        "total_vehicles": len(vehicles)
+    }
+
+@app.get("/fleet/replacement-forecast")
+async def fleet_replacement_forecast(fleet_size: int = 500):
+    """
+    Fleet Manager: Forecast battery replacements for budget planning
+    
+    When should we order new batteries?
+    How much should we budget?
+    """
+    # Simulate fleet degradation profile
+    months_ahead = 12
+    forecast_data = []
+    
+    for month in range(months_ahead):
+        # Degradation curve: slow initially, faster later
+        degradation_rate = 0.5 + 0.3 * (month / months_ahead)
+        expected_replacements = int(fleet_size * degradation_rate / 100)
+        cost = expected_replacements * 50000  # $50K per battery pack
+        
+        forecast_data.append({
+            "month": month + 1,
+            "expected_replacements": expected_replacements,
+            "estimated_cost_usd": cost
+        })
+    
+    total_replacements = sum(f['expected_replacements'] for f in forecast_data)
+    total_cost = sum(f['estimated_cost_usd'] for f in forecast_data)
+    
+    return {
+        "fleet_size": fleet_size,
+        "forecast_months": forecast_data,
+        "total_replacements_12m": total_replacements,
+        "total_budget_required": total_cost,
+        "monthly_average": int(total_cost / 12),
+        "peak_month": max(forecast_data, key=lambda x: x['estimated_cost_usd'])
+    }
+
+# 4️⃣ RESIDENTIAL CUSTOMER ENDPOINTS
+@app.get("/residential/customer-dashboard/{battery_id}")
+async def residential_dashboard(battery_id: str):
+    """
+    Residential Customer: Their home battery app dashboard
+    
+    What customers see when they open the app
+    """
+    # Simulated customer battery data
+    soh_percent = np.random.normal(85, 10)
+    soh_percent = max(30, min(100, soh_percent))
+    installed_years = np.random.uniform(2, 6)
+    
+    dashboard = generate_customer_dashboard(battery_id, soh_percent, installed_years)
+    
+    return {
+        "dashboard": dashboard.dict(),
+        "action_buttons": {
+            "view_savings": "See detailed savings breakdown",
+            "view_health_chart": "View 12-month health trend",
+            "schedule_service": "Schedule inspection" if soh_percent < 80 else None,
+            "upgrade_options": "Explore newer systems" if soh_percent < 85 else None
+        }
+    }
+
+@app.post("/residential/batch-customer-status")
+async def residential_batch_status(batteries: List[Dict[str, Any]]):
+    """
+    Residential Operator: Monitor all customer batteries
+    
+    Used for:
+    - Proactive warranty notifications
+    - Service scheduling
+    - Customer retention
+    """
+    green_zone = sum(1 for b in batteries if b.get('soh_percent', 85) >= 90)
+    yellow_zone = sum(1 for b in batteries if 80 <= b.get('soh_percent', 85) < 90)
+    red_zone = sum(1 for b in batteries if b.get('soh_percent', 85) < 80)
+    
+    warranty_alerts = [
+        b.get('battery_id') for b in batteries
+        if 75 <= b.get('soh_percent', 85) < 80
+    ]
+    
+    return {
+        "total_customers": len(batteries),
+        "healthy": green_zone,
+        "aging": yellow_zone,
+        "warranty_claims": red_zone,
+        "warranty_alerts": warranty_alerts,
+        "proactive_actions": {
+            "call_aging_customers": yellow_zone,
+            "send_warranty_notices": red_zone,
+            "upgrade_offers": int(len(batteries) * 0.15)
+        }
+    }
+
+# 5️⃣ MANUFACTURING QA ENDPOINTS
+@app.post("/manufacturing-qa/test-cell")
+async def manufacturing_test_cell(
+    batch_id: str,
+    cell_id: str,
+    retention_percent: float
+):
+    """
+    Manufacturing QA: Analyze single cell test result
+    
+    Pass/fail decision: CATCH DEFECTS EARLY!
+    """
+    cell_test = analyze_cell_quality(retention_percent, batch_id, cell_id)
+    
+    cost_impact = 4750 if cell_test.pass_fail == "REJECT" else 0
+    
+    return {
+        "cell_test": cell_test.dict(),
+        "financial_impact": f"Savings: ${cost_impact:,}" if cell_test.pass_fail == "REJECT" else "Normal production",
+        "action": "🚨 REJECT" if cell_test.pass_fail == "REJECT" else "✅ PASS"
+    }
+
+@app.post("/manufacturing-qa/batch-analysis")
+async def manufacturing_batch_analysis(cells: List[Dict[str, Any]]):
+    """
+    Manufacturing QA: Analyze entire production batch
+    
+    Decision: Continue production, investigate, or STOP?
+    """
+    cell_tests = [
+        CellTest(
+            cell_id=c['cell_id'],
+            batch_id=c['batch_id'],
+            rated_capacity_ah=3.5,
+            retention_percent=c['retention_percent'],
+            pass_fail="PASS" if c['retention_percent'] >= 98 else "REJECT",
+            degradation_pattern="normal" if c['retention_percent'] >= 98 else "accelerated"
+        )
+        for c in cells
+    ]
+    
+    report = generate_batch_qa_report(cell_tests)
+    
+    return {
+        "batch_report": report.dict(),
+        "production_status": "APPROVED" if report.pass_rate_percent > 95 else "INVESTIGATE" if report.pass_rate_percent > 90 else "STOPPED",
+        "immediate_actions": report.recommended_action.split(" - ")[1] if " - " in report.recommended_action else report.recommended_action
+    }
+
+@app.get("/manufacturing-qa/daily-summary")
+async def manufacturing_daily_summary(
+    total_tested: int = Query(10000, description="Cells tested today"),
+    pass_rate: float = Query(99.87, description="Percentage passing")
+):
+    """
+    Manufacturing QA: Daily production summary
+    
+    Shows quality trends, savings from early defect detection
+    """
+    rejected = int(total_tested * (100 - pass_rate) / 100)
+    savings = rejected * 4750
+    
+    return {
+        "date": datetime.now().date().isoformat(),
+        "total_tested": total_tested,
+        "pass_rate_percent": pass_rate,
+        "rejected": rejected,
+        "defect_detection_savings": f"${savings:,}",
+        "trend": "IMPROVING" if pass_rate > 99 else "STABLE" if pass_rate > 98 else "CONCERNING",
+        "key_metrics": {
+            "internal_resistance_issues": int(rejected * 0.6),
+            "material_batch_defects": int(rejected * 0.25),
+            "electrode_coating_problems": int(rejected * 0.15)
         }
     }
 
