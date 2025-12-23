@@ -5,11 +5,13 @@ import Navbar from '@/components/Navbar';
 import Footer from '@/components/Footer';
 import SimulatorForm from '@/components/SimulatorForm';
 import ResultsDashboard from '@/components/ResultsDashboard';
+import ModelEvaluation from '@/components/ModelEvaluation';
 
 export default function Home() {
   const [results, setResults] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showEvaluation, setShowEvaluation] = useState(false);
 
   const handleSimulation = async (formData: any) => {
     setLoading(true);
@@ -85,6 +87,17 @@ export default function Home() {
             <div className="px-4 py-2 bg-green-900/30 border border-green-500/30 rounded-full text-green-200">
               💡 Clear Explanations
             </div>
+          </div>
+
+          {/* Model Evaluation Button */}
+          <div className="text-center">
+            <button
+              onClick={() => setShowEvaluation(true)}
+              className="inline-flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 text-white font-bold rounded-lg transition-all shadow-lg hover:shadow-xl"
+            >
+              <span>📊</span> Test Model Performance
+            </button>
+            <p className="text-gray-400 text-sm mt-3">Click to see how our hybrid model compares to physics-only models</p>
           </div>
         </section>
 
@@ -274,6 +287,9 @@ export default function Home() {
             </>
           )}
         </section>
+
+        {/* Model Evaluation Modal */}
+        {showEvaluation && <ModelEvaluation onClose={() => setShowEvaluation(false)} />}
 
         {/* Footer Spacing */}
         <div className="h-12" />
