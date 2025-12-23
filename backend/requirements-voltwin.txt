@@ -1,0 +1,24 @@
+# VoltTwin Backend Requirements
+
+# Web Framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+
+# Scientific Computing
+numpy==1.26.4
+pandas==2.1.4
+scikit-learn==1.3.2
+scipy==1.11.4
+
+# Machine Learning
+tensorflow==2.15.0
+
+# Data Validation
+pydantic==2.5.0
+
+# Development
+python-multipart==0.0.6
+
+# Optional: for async database operations
+# sqlalchemy==2.0.23
+# asyncpg==0.29.0
