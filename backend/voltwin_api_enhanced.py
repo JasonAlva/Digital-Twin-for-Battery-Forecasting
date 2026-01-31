@@ -254,7 +254,7 @@ def predict_eol_date(
     cycles_per_month: float = 100
 ) -> Optional[int]:
     """
-    Predict months until End of Life (80% SoH threshold)
+    Predict months until End of Life (20% SoH threshold = 80% degradation)
     
     Returns:
         Months until EOL, or None if already below threshold
@@ -262,7 +262,7 @@ def predict_eol_date(
     if soh_percent < 70:
         return None
     
-    eol_soh = 80
+    eol_soh = 20  # EOL at 20% remaining capacity
     if soh_percent <= eol_soh:
         return 0
     
@@ -687,8 +687,8 @@ def simulate_battery(input_data: SimulationInput) -> dict:
             capacity_ml = capacity_physics + residuals
             capacity_hybrid = (capacity_physics + capacity_ml) / 2.0
     
-    # 4. Find End-of-Life (80% of initial capacity)
-    eol_threshold = input_data.initial_capacity_ah * 0.8
+    # 4. Find End-of-Life (80% degradation = 20% remaining capacity)
+    eol_threshold = input_data.initial_capacity_ah * 0.2
     eol_cycles = None
     for i, cap in enumerate(capacity_hybrid):
         if cap < eol_threshold:
